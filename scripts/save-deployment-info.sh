@@ -8,10 +8,13 @@ set -euo pipefail
 # data from provision-user-data.yaml and picks the newest kubeconfig.
 #
 # Usage:
-#   Single-hub (original):
+#   Auto-detect (recommended — infers mode from output directories):
+#     ./scripts/save-deployment-info.sh
+#
+#   Single-hub (explicit):
 #     ./scripts/save-deployment-info.sh [GUID]
 #
-#   Multi-hub (Mode 2):
+#   Multi-hub (explicit):
 #     ./scripts/save-deployment-info.sh --mode multi-hub --sandbox <SANDBOX_ID>
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,6 +41,64 @@ done
 if ! command -v python3 &>/dev/null; then
   echo "ERROR: python3 is required" >&2
   exit 1
+fi
+
+# ── Auto-detect mode when no --mode flag is given ─────────────────────
+if [[ -z "${MODE}" && ${#args[@]} -eq 0 ]]; then
+  # Try config.yml first for the GUID / sandbox hint
+  CONFIG_FILE="${PROJECT_ROOT}/config.yml"
+  CONFIG_GUID=""
+  CONFIG_MODE=""
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    CONFIG_GUID=$(python3 -c "import yaml; print(yaml.safe_load(open('${CONFIG_FILE}')).get('agd_guid',''))" 2>/dev/null) || true
+    CONFIG_MODE=$(python3 -c "import yaml; print(yaml.safe_load(open('${CONFIG_FILE}')).get('mode',''))" 2>/dev/null) || true
+  fi
+
+  # Scan output directories for multi-hub pattern: multiple dirs sharing
+  # the same sandbox suffix (e.g. east-ctbz4, west-ctbz4, global-ctbz4)
+  _detected_sandbox=""
+  _detected_count=0
+  if [[ -d "${AGD_BASE}" ]]; then
+    # Build a map of suffix → count from directory names containing a hyphen
+    declare -A _suffix_counts=()
+    for d in "${AGD_BASE}"/*/; do
+      [[ -d "$d" ]] || continue
+      dname="$(basename "$d")"
+      # Only consider dirs with a hyphen (e.g. east-ctbz4, not standalone GUIDs)
+      if [[ "$dname" == *-* ]]; then
+        suffix="${dname##*-}"
+        _suffix_counts["$suffix"]=$(( ${_suffix_counts["$suffix"]:-0} + 1 ))
+      fi
+    done
+
+    # Find the suffix with the most matches (≥2 means multi-hub)
+    for suffix in "${!_suffix_counts[@]}"; do
+      if (( _suffix_counts["$suffix"] >= 2 && _suffix_counts["$suffix"] > _detected_count )); then
+        _detected_sandbox="$suffix"
+        _detected_count="${_suffix_counts["$suffix"]}"
+      fi
+    done
+    unset _suffix_counts
+  fi
+
+  if (( _detected_count >= 2 )); then
+    MODE="multi-hub"
+    SANDBOX="${_detected_sandbox}"
+    echo "Auto-detected multi-hub mode (sandbox: ${SANDBOX}, ${_detected_count} hubs found)" >&2
+  elif [[ -n "${CONFIG_GUID}" ]]; then
+    # Single-hub: use the GUID from config.yml
+    OUTPUT_CHECK="${AGD_BASE}/${CONFIG_GUID}"
+    if [[ -d "${OUTPUT_CHECK}" ]]; then
+      args+=("${CONFIG_GUID}")
+    else
+      echo "WARNING: config.yml references GUID '${CONFIG_GUID}' but no matching output directory exists at ${OUTPUT_CHECK}." >&2
+      echo "  Run bootstrap.sh to reconfigure, or pass the GUID explicitly." >&2
+      exit 1
+    fi
+  else
+    echo "ERROR: Cannot auto-detect deployment. Pass a GUID, or use --mode multi-hub --sandbox <id>." >&2
+    exit 1
+  fi
 fi
 
 # ── Multi-hub mode ────────────────────────────────────────────────────

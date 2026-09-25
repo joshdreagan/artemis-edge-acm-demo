@@ -1,0 +1,18 @@
+{
+  "authority_id": "99",
+  "title": "save-deployment-info.sh auto-detects multi-hub mode",
+  "criteria": [
+    {
+      "check": "command_exit",
+      "target": "cd /home/vpcuser/artemis-edge-acm-demo && bash scripts/save-deployment-info.sh 2>&1 | grep -q 'multi-hub'"
+    },
+    {
+      "check": "command_exit",
+      "target": "grep -q 'mode: multi-hub' /home/vpcuser/artemis-edge-acm-demo/deployment-info.yml"
+    },
+    {
+      "check": "command_exit",
+      "target": "grep -q 'Auto-detected' scripts/save-deployment-info.sh"
+    }
+  ]
+}
