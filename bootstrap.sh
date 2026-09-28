@@ -9,6 +9,7 @@
 #   ./bootstrap.sh --mode prod        # end-user setup and deploy
 #   ./bootstrap.sh --non-interactive  # use all defaults, no prompts
 #   ./bootstrap.sh --check-only       # run validation and quota checks only
+#   ./bootstrap.sh --reconfigure      # ignore existing config.yml, re-prompt
 #   ./bootstrap.sh --help             # show usage
 
 set -euo pipefail
@@ -36,6 +37,7 @@ run_msg() { echo -e "  ${BLUE}[RUN]${RESET}     $*"; }
 MODE="prod"
 NON_INTERACTIVE=false
 CHECK_ONLY=false
+RECONFIGURE=false
 
 usage() {
     cat <<'EOF'
@@ -47,6 +49,7 @@ Options:
   --mode dev|prod    dev = maintainer setup, prod = end-user deploy (default: prod)
   --non-interactive  Accept all defaults without prompting
   --check-only       Run validation and quota checks only (does not deploy)
+  --reconfigure      Ignore existing config.yml and re-prompt all values
   --deploy           Alias for --mode prod --non-interactive (one-shot deploy)
   --help             Show this help
 
@@ -59,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         --mode)       MODE="${2:-prod}"; shift 2 ;;
         --non-interactive) NON_INTERACTIVE=true; shift ;;
         --check-only) CHECK_ONLY=true; shift ;;
+        --reconfigure) RECONFIGURE=true; shift ;;
         --deploy)     MODE="prod"; NON_INTERACTIVE=true; shift ;;
         --help|-h)    usage ;;
         *)            echo "Unknown option: $1"; usage ;;
@@ -278,6 +282,62 @@ prompt_for() {
     done
 }
 
+# ─── GCP Key Auto-Detection ──────────────────────────────────────────────────
+
+detect_gcp_key() {
+    local project_root
+    project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    # Already set (e.g. from existing config.yml or env) — skip detection
+    if [[ -n "${VARS[gcp_key_path]+_}" && -n "${VARS[gcp_key_path]}" ]]; then
+        return 0
+    fi
+
+    # Search for GCP key files in the project root
+    local key_file=""
+    if [[ -f "${project_root}/gcp-key.json" ]]; then
+        key_file="${project_root}/gcp-key.json"
+    else
+        local candidate
+        for candidate in "${project_root}"/gcp-key-*.json; do
+            if [[ -f "$candidate" ]]; then
+                key_file="$candidate"
+                break
+            fi
+        done
+    fi
+
+    if [[ -z "$key_file" ]]; then
+        return 0
+    fi
+
+    info "Auto-detected GCP key: ${key_file}"
+    VARS[gcp_key_path]="$key_file"
+
+    # Extract sandbox ID from client_email (sa-openenv-XXXXX@...)
+    local sandbox_id
+    sandbox_id=$(python3 -c "
+import json, sys, re
+with open(sys.argv[1]) as f:
+    key = json.load(f)
+email = key.get('client_email', '')
+m = re.search(r'sa-openenv-([a-z0-9]{5})@', email)
+if m:
+    print(m.group(1))
+" "$key_file" 2>/dev/null || true)
+
+    if [[ -n "$sandbox_id" ]]; then
+        info "Auto-detected sandbox ID from GCP key: ${sandbox_id}"
+        if [[ -z "${VARS[agd_guid]+_}" || -z "${VARS[agd_guid]}" ]]; then
+            VARS[agd_guid]="$sandbox_id"
+        fi
+        # Pre-derive hub_domain default so it is available for substitute_vars
+        if [[ -z "${VARS[hub_domain]+_}" || -z "${VARS[hub_domain]}" ]]; then
+            VARS[hub_domain]="apps.hub.${sandbox_id}.gcp.redhatworkshops.io"
+        fi
+    fi
+}
+
 # ─── Phase: Prerequisites ───────────────────────────────────────────────────
 
 install_prerequisites() {
@@ -408,7 +468,11 @@ configure() {
     count="$(manifest_len ".config.prompts")"
     if (( count == 0 )); then return 0; fi
 
-    load_existing_config
+    if [[ "$RECONFIGURE" == "true" ]]; then
+        info "Reconfigure mode — ignoring existing config.yml"
+    else
+        load_existing_config
+    fi
 
     echo ""
     echo -e "${BOLD}--- Configuration ---${RESET}"
@@ -421,6 +485,21 @@ configure() {
         default_val="$(manifest_get ".config.prompts[$i].default")"
         required="$(manifest_get ".config.prompts[$i].required")"
         choices="$(manifest_get ".config.prompts[$i].choices")"
+
+        # Skip hub02_domain when mode is single-hub
+        if [[ "$key" == "hub02_domain" && "${VARS[mode]:-single-hub}" == "single-hub" ]]; then
+            VARS[hub02_domain]="${VARS[hub02_domain]:-}"
+            continue
+        fi
+
+        # Mode-aware hub_domain default: override the manifest default when
+        # mode is multi-hub so the prompt shows the correct tier-0 domain.
+        if [[ "$key" == "hub_domain" && "${VARS[mode]:-single-hub}" == "multi-hub" ]]; then
+            local guid="${VARS[agd_guid]:-}"
+            if [[ -n "$guid" && -z "${VARS[hub_domain]+_}" ]]; then
+                default_val="apps.hub.global-${guid}.gcp.redhatworkshops.io"
+            fi
+        fi
 
         choices_str=""
         if [[ -n "$choices" && "$choices" != "null" ]]; then
@@ -616,7 +695,10 @@ main() {
     info "Manifest: ${MANIFEST}"
 
     if [[ "$CHECK_ONLY" == "true" ]]; then
-        load_existing_config
+        if [[ "$RECONFIGURE" != "true" ]]; then
+            load_existing_config
+        fi
+        detect_gcp_key
         if [[ -z "${VARS[gcp_quota_region]:-}" ]]; then
             VARS[gcp_quota_region]="us-east1"
         fi
@@ -626,6 +708,8 @@ main() {
         show_post_setup
         exit $rc
     fi
+
+    detect_gcp_key
 
     install_prerequisites "$distro" ".prerequisites" "Prerequisites"
 

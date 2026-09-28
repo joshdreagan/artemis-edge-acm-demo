@@ -32,13 +32,19 @@ cd artemis-edge-acm-demo
 
 The bootstrap script reads [`onboard.yml`](onboard.yml) at runtime and:
 
-1. Installs prerequisites (Python 3.12, Podman, Helm, gcloud, Java 21, etc.)
-2. Clones [AgnosticD v2](https://github.com/tosin2013/agnosticd-v2) and runs `agd setup`
-3. Copies vars and scaffolds secrets files
-4. Generates TLS certificates
-5. Prompts for configuration (GUID, cloud provider, domain)
-6. Validates your environment
-7. Deploys via `agd provision` (in prod mode)
+1. **Auto-detects** `gcp-key.json` in the project root and extracts the sandbox ID
+2. Installs prerequisites (Python 3.12, Podman, Helm, gcloud, Java 21, etc.)
+3. Clones [AgnosticD v2](https://github.com/tosin2013/agnosticd-v2) and runs `agd setup`
+4. Copies vars and scaffolds secrets files
+5. Generates TLS certificates
+6. Prompts for configuration (pre-filled with auto-detected GUID, domain, key path)
+7. Validates your environment
+8. Deploys via `agd provision` (in prod mode)
+
+> **Tip:** Drop your GCP service account key as `gcp-key.json` in the repo root
+> before running `bootstrap.sh`. It will auto-detect the sandbox ID from the
+> key's `client_email` field and pre-fill `agd_guid`, `hub_domain`, and
+> `gcp_key_path` — no manual `config.yml` editing required.
 
 ### Non-Interactive Deploy
 
@@ -64,6 +70,15 @@ Installs extra tools (ShellCheck, yamllint) for linting and testing.
 
 Runs validation checks without installing or deploying anything.
 
+### Reconfigure (Switch Sandboxes)
+
+```bash
+./bootstrap.sh --reconfigure
+```
+
+Ignores the existing `config.yml` and re-prompts all values from scratch.
+Use this when switching to a new GCP sandbox — no manual editing needed.
+
 ## Deployment Modes
 
 | Mode | What AgnosticD creates | What students create | Description |
@@ -78,9 +93,10 @@ See [docs/architecture.md](docs/architecture.md) and [agnosticd/gcp/MODE2.md](ag
 ```
 bootstrap.sh --mode prod
   └─ reads onboard.yml
+     └─ auto-detects gcp-key.json → sandbox ID, key path, hub domain
      └─ installs prerequisites
+     └─ prompts for config (pre-filled from auto-detection)
      └─ runs setup steps (clone agnosticd-v2, agd setup, scaffold secrets)
-     └─ prompts for config (GUID, domain, etc.)
      └─ validates environment
      └─ calls deploy.sh
         └─ cd agnosticd-v2 && agd provision -g GUID -c artemis-edge-gcp -a ACCOUNT

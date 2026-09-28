@@ -170,6 +170,8 @@ config:
 
     - key: hub_domain
       prompt: "Hub cluster ingress domain"
+      # Mode 1 (single-hub) default. bootstrap.sh overrides this to
+      # apps.hub.global-{guid}.gcp.redhatworkshops.io when mode=multi-hub.
       default: "apps.hub.${agd_guid}.gcp.redhatworkshops.io"
       required: true
 
