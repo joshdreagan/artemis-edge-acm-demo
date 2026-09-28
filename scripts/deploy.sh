@@ -221,6 +221,53 @@ cd "${AGD_ROOT}"
 if [[ "${AGD_ACTION}" == "provision" ]]; then
   ./bin/agd "${AGD_ACTION}" -g "${AGD_GUID}" -c "${AGD_CONFIG}" -a "${AGD_ACCOUNT}"
   AGD_EXIT=$?
+
+  # Mode 2 cert-manager zone fix + retry
+  # The upstream cert-manager template hardcodes dns-zone-{{ guid }}, but the
+  # GCP Cloud DNS zone is dns-zone-{sandbox}. When guid is a composite like
+  # east-sbhtd, the template produces dns-zone-east-sbhtd (wrong). If provision
+  # failed and a kubeconfig exists, fix the zone and re-run provision.
+  if [[ $AGD_EXIT -ne 0 && "${DEPLOY_MODE}" == "multi-hub" ]]; then
+    KUBECONFIG_FILE="${AGD_ROOT}/../agnosticd-v2-output/${AGD_GUID}/openshift-cluster_${AGD_GUID}_kubeconfig"
+    if [[ -f "$KUBECONFIG_FILE" ]]; then
+      CURRENT_ZONE=$(KUBECONFIG="$KUBECONFIG_FILE" oc get clusterissuer letsencrypt-production-gcp \
+        -o jsonpath='{.spec.acme.solvers[0].dns01.cloudDNS.hostedZoneName}' 2>/dev/null || true)
+      CORRECT_ZONE="dns-zone-${SANDBOX}"
+      if [[ -n "$CURRENT_ZONE" && "$CURRENT_ZONE" != "$CORRECT_ZONE" ]]; then
+        echo ""
+        echo "=== Cert-manager zone mismatch detected: ${CURRENT_ZONE} != ${CORRECT_ZONE} ==="
+        echo "    Applying fix and retrying provision..."
+        echo ""
+
+        # Patch ClusterIssuer with correct zone
+        KUBECONFIG="$KUBECONFIG_FILE" oc patch clusterissuer letsencrypt-production-gcp --type=json \
+          -p "[{\"op\":\"replace\",\"path\":\"/spec/acme/solvers/0/dns01/cloudDNS/hostedZoneName\",\"value\":\"${CORRECT_ZONE}\"}]" \
+          2>&1 || true
+
+        # Remove stale challenges (patch off finalizers so they can be deleted)
+        for _ns in openshift-ingress openshift-config; do
+          for _ch in $(KUBECONFIG="$KUBECONFIG_FILE" oc get challenges -n "$_ns" \
+              -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            KUBECONFIG="$KUBECONFIG_FILE" oc patch challenge "$_ch" -n "$_ns" \
+              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+          done
+        done
+
+        # Delete stale certificates so they are recreated with the correct zone
+        KUBECONFIG="$KUBECONFIG_FILE" oc delete certificates -A --all 2>/dev/null || true
+        KUBECONFIG="$KUBECONFIG_FILE" oc delete certificaterequests -A --all 2>/dev/null || true
+        KUBECONFIG="$KUBECONFIG_FILE" oc delete orders -A --all 2>/dev/null || true
+        KUBECONFIG="$KUBECONFIG_FILE" oc delete challenges -A --all 2>/dev/null || true
+        sleep 10
+
+        echo ""
+        echo "=== Retrying agd provision (idempotent — resumes from failed step)... ==="
+        ./bin/agd "${AGD_ACTION}" -g "${AGD_GUID}" -c "${AGD_CONFIG}" -a "${AGD_ACCOUNT}"
+        AGD_EXIT=$?
+      fi
+    fi
+  fi
+
   echo ""
   echo "=== Saving deployment info... ==="
   "${SCRIPT_DIR}/save-deployment-info.sh" "${AGD_GUID}" || echo "WARN: save-deployment-info.sh failed (non-fatal)"
