@@ -437,6 +437,35 @@ if [[ "$IC_READY" != "true" ]]; then
 fi
 log_ok "install-config secrets ready"
 
+# Verify install-config baseDomain matches what we expect.
+# ArgoCD may have rendered a stale secret from old values.
+for i in $(seq 0 $((CLUSTER_COUNT - 1))); do
+  SPOKE="${SELECTED_SPOKES[$i]}"
+  IC_BD=$(oc get secret "${SPOKE}-install-config" -n "$SPOKE" \
+    -o jsonpath='{.data.install-config\.yaml}' 2>/dev/null | base64 -d 2>/dev/null | grep 'baseDomain:' | awk '{print $2}')
+  if [[ "$IC_BD" != "$BASE_DOMAIN" ]]; then
+    log_warn "install-config for $SPOKE has baseDomain '$IC_BD' but expected '$BASE_DOMAIN'"
+    echo "  Deleting stale secret and waiting for ArgoCD to re-render..."
+    oc delete secret "${SPOKE}-install-config" -n "$SPOKE" --force --grace-period=0 &>/dev/null
+    # Wait for ArgoCD to recreate with correct value
+    BD_WAIT=0
+    while [[ $BD_WAIT -lt 60 ]]; do
+      sleep 5
+      BD_WAIT=$((BD_WAIT + 5))
+      IC_BD=$(oc get secret "${SPOKE}-install-config" -n "$SPOKE" \
+        -o jsonpath='{.data.install-config\.yaml}' 2>/dev/null | base64 -d 2>/dev/null | grep 'baseDomain:' | awk '{print $2}')
+      if [[ "$IC_BD" == "$BASE_DOMAIN" ]]; then break; fi
+    done
+    if [[ "$IC_BD" != "$BASE_DOMAIN" ]]; then
+      log_fail "install-config baseDomain mismatch persists for $SPOKE: got '$IC_BD', expected '$BASE_DOMAIN'."
+      echo "  Check ArgoCD sync: oc get app field-content -n openshift-gitops"
+      exit 1
+    fi
+    log_ok "install-config for $SPOKE corrected: baseDomain=$IC_BD"
+  fi
+done
+log_ok "install-config baseDomain verified: $BASE_DOMAIN"
+
 for i in $(seq 0 $((CLUSTER_COUNT - 1))); do
   SPOKE="${SELECTED_SPOKES[$i]}"
   if oc get clusterdeployment "$SPOKE" -n "$SPOKE" &>/dev/null; then
