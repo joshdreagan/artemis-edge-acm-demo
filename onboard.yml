@@ -161,7 +161,7 @@ config:
       choices: ["gcp", "azure"]
 
     - key: agd_guid
-      prompt: "AgnosticD deployment GUID (your GCP sandbox ID, e.g. 725j2)"
+      prompt: "GCP sandbox ID (5-char OpenEnv ID, e.g. sbhtd). In multi-hub mode, cluster GUIDs are derived: global-X, east-X, cen-X, west-X"
       required: true
 
     - key: agd_account
@@ -170,13 +170,14 @@ config:
 
     - key: hub_domain
       prompt: "Hub cluster ingress domain"
-      # Mode 1 (single-hub) default. bootstrap.sh overrides this to
-      # apps.hub.global-{guid}.gcp.redhatworkshops.io when mode=multi-hub.
+      # Mode 1 (single-hub): apps.hub.{guid}.gcp.redhatworkshops.io
+      # Mode 2 (multi-hub): apps.hub.{sandbox}.gcp.redhatworkshops.io (no tier prefix for global)
+      # bootstrap.sh overrides this default based on mode selection.
       default: "apps.hub.${agd_guid}.gcp.redhatworkshops.io"
       required: true
 
     - key: hub02_domain
-      prompt: "Second hub domain (multi-hub only)"
+      prompt: "Second hub domain (single-hub only; ignored in multi-hub where each hub derives its own domain)"
 
     - key: spoke_count
       prompt: "Number of edge SNO clusters"
@@ -234,6 +235,21 @@ validation:
     required: true
     fail_message: "Copy vars: cp agnosticd/gcp/vars.yml ${agnosticd_root}/../agnosticd-v2-vars/artemis-edge-gcp.yml"
 
+  - name: "Multi-hub vars files (Mode 2)"
+    command: "test '${mode}' != 'multi-hub' || (test -f ${agnosticd_root}/../agnosticd-v2-vars/artemis-edge-gcp-multihub.yml && test -f ${agnosticd_root}/../agnosticd-v2-vars/artemis-edge-gcp-multihub-regional.yml && test -f ${agnosticd_root}/../agnosticd-v2-vars/artemis-edge-gcp-multihub-central.yml && test -f ${agnosticd_root}/../agnosticd-v2-vars/artemis-edge-gcp-multihub-west.yml)"
+    required: true
+    fail_message: "Multi-hub vars files missing. Re-run setup step 'Sync vars to agnosticd-v2-vars' or copy manually from agnosticd/gcp/"
+
+  - name: "Cert-manager zone fix script (Mode 2)"
+    command: "test '${mode}' != 'multi-hub' || test -x scripts/fix-cert-manager-zone.sh"
+    required: true
+    fail_message: "scripts/fix-cert-manager-zone.sh must exist and be executable for Mode 2 cert-manager workaround"
+
+  - name: "Post-provision finalize script (Mode 2)"
+    command: "test '${mode}' != 'multi-hub' || test -x scripts/post-provision-multihub.sh"
+    required: true
+    fail_message: "scripts/post-provision-multihub.sh must exist and be executable for Mode 2 hub import"
+
   - name: "Cloud CLI authenticated"
     command: "gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -1 | grep -q ."
     required: true
@@ -272,12 +288,15 @@ validation:
 # ─────────────────────────────────────────────────────────────
 # Quota Checks (Phase 5b) — OpenShift cluster capacity, not SNOs.
 # Spoke N2 checks stay in scripts/deploy-spokes.sh (Module 2).
-# needed: 132 covers Mode 2 T0 (3 CP + 5 workers n2-standard-16 + bastion).
-# T1 / Mode 1 need 100. SSD is T0 node disks (8 x 500 GiB) + bastion 50.
+# Mode 1 / single-hub: one region (gcp_quota_region) needs 100 N2 vCPUs.
+# Mode 2 / multi-hub: 4 regions — us-east1 (T0-global), us-east4 (east),
+#   us-central1 (central), us-west1 (west). Each needs ≈132 N2 vCPUs.
+# SSD: T0 = 8 x 500 GiB node + 50 bastion; regional = similar.
 # ─────────────────────────────────────────────────────────────
 
 quota_checks:
-  - label: "GCP N2 vCPUs (OpenShift cluster)"
+  # --- Single-hub / Mode 1 checks (gcp_quota_region) ---
+  - label: "GCP N2 vCPUs (${gcp_quota_region})"
     needed: 132
     limit_command: >-
       gcloud compute regions describe ${gcp_quota_region} --project=openenv-${agd_guid}
@@ -290,7 +309,7 @@ quota_checks:
       n2-standard-16 + n2-standard-4 bastion). T1 and Mode 1 need 100. Request a quota
       increase on Open Environment project openenv-${agd_guid}.
 
-  - label: "GCP SSD GB (OpenShift cluster disks)"
+  - label: "GCP SSD GB (${gcp_quota_region})"
     needed: 4050
     limit_command: >-
       gcloud compute regions describe ${gcp_quota_region} --project=openenv-${agd_guid}
@@ -301,6 +320,83 @@ quota_checks:
     fail_message: >-
       Need 4050 GiB SSD in ${gcp_quota_region} for Mode 2 T0 (8 x 500 GiB node disks + 50 GiB
       bastion). T1 needs 3050. Request a quota increase on openenv-${agd_guid}.
+
+  # --- Mode 2: additional regional quota checks (east, central, west) ---
+  # These only apply when mode=multi-hub. The test short-circuits in single-hub.
+  - label: "GCP N2 vCPUs (us-east4 — east hub, Mode 2 only)"
+    needed: 132
+    condition: "${mode} == multi-hub"
+    limit_command: >-
+      gcloud compute regions describe us-east4 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('limit',0)) for q in qs if q.get('metric')=='N2_CPUS'), 0))"
+    usage_command: >-
+      gcloud compute regions describe us-east4 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('usage',0)) for q in qs if q.get('metric')=='N2_CPUS'), 0))"
+    fail_message: >-
+      Need 132 free N2 vCPUs in us-east4 for Mode 2 east regional hub.
+      Request a quota increase on openenv-${agd_guid}.
+
+  - label: "GCP SSD GB (us-east4 — east hub, Mode 2 only)"
+    needed: 4050
+    condition: "${mode} == multi-hub"
+    limit_command: >-
+      gcloud compute regions describe us-east4 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('limit',0)) for q in qs if q.get('metric')=='SSD_TOTAL_GB'), 0))"
+    usage_command: >-
+      gcloud compute regions describe us-east4 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('usage',0)) for q in qs if q.get('metric')=='SSD_TOTAL_GB'), 0))"
+    fail_message: >-
+      Need 4050 GiB SSD in us-east4 for Mode 2 east hub. Request a quota increase on openenv-${agd_guid}.
+
+  - label: "GCP N2 vCPUs (us-central1 — central hub, Mode 2 only)"
+    needed: 132
+    condition: "${mode} == multi-hub"
+    limit_command: >-
+      gcloud compute regions describe us-central1 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('limit',0)) for q in qs if q.get('metric')=='N2_CPUS'), 0))"
+    usage_command: >-
+      gcloud compute regions describe us-central1 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('usage',0)) for q in qs if q.get('metric')=='N2_CPUS'), 0))"
+    fail_message: >-
+      Need 132 free N2 vCPUs in us-central1 for Mode 2 central hub.
+      Request a quota increase on openenv-${agd_guid}.
+
+  - label: "GCP SSD GB (us-central1 — central hub, Mode 2 only)"
+    needed: 4050
+    condition: "${mode} == multi-hub"
+    limit_command: >-
+      gcloud compute regions describe us-central1 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('limit',0)) for q in qs if q.get('metric')=='SSD_TOTAL_GB'), 0))"
+    usage_command: >-
+      gcloud compute regions describe us-central1 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('usage',0)) for q in qs if q.get('metric')=='SSD_TOTAL_GB'), 0))"
+    fail_message: >-
+      Need 4050 GiB SSD in us-central1 for Mode 2 central hub. Request a quota increase on openenv-${agd_guid}.
+
+  - label: "GCP N2 vCPUs (us-west1 — west hub, Mode 2 only)"
+    needed: 132
+    condition: "${mode} == multi-hub"
+    limit_command: >-
+      gcloud compute regions describe us-west1 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('limit',0)) for q in qs if q.get('metric')=='N2_CPUS'), 0))"
+    usage_command: >-
+      gcloud compute regions describe us-west1 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('usage',0)) for q in qs if q.get('metric')=='N2_CPUS'), 0))"
+    fail_message: >-
+      Need 132 free N2 vCPUs in us-west1 for Mode 2 west hub.
+      Request a quota increase on openenv-${agd_guid}.
+
+  - label: "GCP SSD GB (us-west1 — west hub, Mode 2 only)"
+    needed: 4050
+    condition: "${mode} == multi-hub"
+    limit_command: >-
+      gcloud compute regions describe us-west1 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('limit',0)) for q in qs if q.get('metric')=='SSD_TOTAL_GB'), 0))"
+    usage_command: >-
+      gcloud compute regions describe us-west1 --project=openenv-${agd_guid}
+      --format='json(quotas)' | python3 -c "import json,sys; qs=(json.load(sys.stdin).get('quotas') or []); print(next((int(q.get('usage',0)) for q in qs if q.get('metric')=='SSD_TOTAL_GB'), 0))"
+    fail_message: >-
+      Need 4050 GiB SSD in us-west1 for Mode 2 west hub. Request a quota increase on openenv-${agd_guid}.
 
 # ─────────────────────────────────────────────────────────────
 # Post-Setup Message
@@ -313,19 +409,32 @@ post_setup:
     1. Edit your GCP secrets file:
        ${agnosticd_root}/../agnosticd-v2-secrets/secrets-${agd_account}.yml
 
-    2. Deploy (one command):
-       ./scripts/deploy.sh --guid ${agd_guid} --account ${agd_account}
+    2. Deploy:
 
-       Or directly with agd:
-       cd ${agnosticd_root}
-       ./bin/agd provision -g ${agd_guid} -c artemis-edge-gcp -a ${agd_account}
+       Mode 1 (single-hub):
+         ./scripts/deploy.sh --guid ${agd_guid} --account ${agd_account}
+
+       Mode 2 (multi-hub — 4 clusters: global, east, central, west):
+         # Provision each tier (Global Hub T0 first, then regional hubs):
+         cd ${agnosticd_root}
+         ./bin/agd provision -g global-${agd_guid} -c artemis-edge-gcp-multihub -a ${agd_account}
+         ./bin/agd provision -g east-${agd_guid} -c artemis-edge-gcp-multihub-regional -a ${agd_account}
+         ./bin/agd provision -g cen-${agd_guid} -c artemis-edge-gcp-multihub-central -a ${agd_account}
+         ./bin/agd provision -g west-${agd_guid} -c artemis-edge-gcp-multihub-west -a ${agd_account}
+         # After all 4 are up, finalize:
+         cd <repo_root>
+         ./scripts/post-provision-multihub.sh ${agd_guid}
+         # Or use the wrapper:
+         ./scripts/deploy.sh --mode multi-hub --sandbox ${agd_guid} --account ${agd_account}
 
     3. After provisioning, deployment-info.yml is updated automatically.
        To refresh manually:
-       ./scripts/save-deployment-info.sh ${agd_guid}
+         Mode 1: ./scripts/save-deployment-info.sh ${agd_guid}
+         Mode 2: ./scripts/save-deployment-info.sh --mode multi-hub --sandbox ${agd_guid}
 
     4. Destroy when finished:
-       ./scripts/deploy.sh --destroy --guid ${agd_guid} --account ${agd_account}
+         Mode 1: ./scripts/deploy.sh --destroy --guid ${agd_guid} --account ${agd_account}
+         Mode 2: ./scripts/deploy.sh --destroy --mode multi-hub --sandbox ${agd_guid} --account ${agd_account}
 
 # ─────────────────────────────────────────────────────────────
 # Modes (dev = maintainers, prod = end users)
@@ -355,4 +464,7 @@ modes:
   prod:
     description: "Set up and deploy for end users"
     phases: [prerequisites, setup_steps, config, validation, deploy]
+    # Mode 1:
     post_validation_command: "./scripts/deploy.sh --guid ${agd_guid} --account ${agd_account}"
+    # Mode 2 (when mode=multi-hub):
+    post_validation_command_multihub: "./scripts/deploy.sh --mode multi-hub --sandbox ${agd_guid} --account ${agd_account}"

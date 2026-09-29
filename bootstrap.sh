@@ -493,11 +493,13 @@ configure() {
         fi
 
         # Mode-aware hub_domain default: override the manifest default when
-        # mode is multi-hub so the prompt shows the correct tier-0 domain.
+        # mode is multi-hub. The global hub's domain uses the sandbox ID
+        # directly (e.g. apps.hub.sbhtd.gcp.redhatworkshops.io), NOT the
+        # composed GUID (global-sbhtd).
         if [[ "$key" == "hub_domain" && "${VARS[mode]:-single-hub}" == "multi-hub" ]]; then
             local guid="${VARS[agd_guid]:-}"
             if [[ -n "$guid" && -z "${VARS[hub_domain]+_}" ]]; then
-                default_val="apps.hub.global-${guid}.gcp.redhatworkshops.io"
+                default_val="apps.hub.${guid}.gcp.redhatworkshops.io"
             fi
         fi
 

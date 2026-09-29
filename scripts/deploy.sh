@@ -270,7 +270,13 @@ if [[ "${AGD_ACTION}" == "provision" ]]; then
 
   echo ""
   echo "=== Saving deployment info... ==="
-  "${SCRIPT_DIR}/save-deployment-info.sh" "${AGD_GUID}" || echo "WARN: save-deployment-info.sh failed (non-fatal)"
+  if [[ "${DEPLOY_MODE}" == "multi-hub" ]]; then
+    "${SCRIPT_DIR}/save-deployment-info.sh" --mode multi-hub --sandbox "${SANDBOX}" \
+      || echo "WARN: save-deployment-info.sh failed (non-fatal)"
+  else
+    "${SCRIPT_DIR}/save-deployment-info.sh" "${AGD_GUID}" \
+      || echo "WARN: save-deployment-info.sh failed (non-fatal)"
+  fi
   echo ""
   echo "=== Patching Showroom for deployment mode... ==="
   KUBECONFIG_FILE="${AGD_ROOT}/../agnosticd-v2-output/${AGD_GUID}/openshift-cluster_${AGD_GUID}_kubeconfig"
