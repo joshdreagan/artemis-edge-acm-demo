@@ -33,5 +33,5 @@ spec:
   acceptors:
     {{- include "artemis-edge.brokerAcceptorsWithSecret" (dict "Values" $.Values "tlsSecretName" (printf "%s-broker-tls-secret" .name)) | nindent 4 }}
   console:
-    expose: false
+    expose: {{ .exposeConsole | default true }}
 {{- end }}

@@ -51,5 +51,5 @@ spec:
         service.beta.openshift.io/serving-cert-secret-name: amqps-acceptor-ptls
   {{- end }}
   console:
-    expose: false
+    expose: {{ .exposeConsole | default true }}
 {{- end }}
