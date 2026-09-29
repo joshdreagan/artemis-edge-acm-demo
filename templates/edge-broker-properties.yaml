@@ -107,11 +107,11 @@ stringData:
     # Federation configurations
     AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.type=FEDERATION
 
-    # Remote policy: 5604 with maxHops=0
-    AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.remoteAddressPolicies.remote-policy-5604.autoDelete=true
-    AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.remoteAddressPolicies.remote-policy-5604.autoDeleteDelay=0
-    AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.remoteAddressPolicies.remote-policy-5604.autoDeleteMessageCount=1000
-    AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.remoteAddressPolicies.remote-policy-5604.maxHops=0
-    AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.remoteAddressPolicies.remote-policy-5604.includes.5604.addressMatch=messages.{{ $spoke.region }}.5604
+    # Remote policy: 5604 with maxHops=1
+    AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.remoteAddressPolicies.{{ $spoke.name }}-to-{{ $conn.hub }}-federation-policy.autoDelete=true
+    AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.remoteAddressPolicies.{{ $spoke.name }}-to-{{ $conn.hub }}-federation-policy.autoDeleteDelay=0
+    AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.remoteAddressPolicies.{{ $spoke.name }}-to-{{ $conn.hub }}-federation-policy.autoDeleteMessageCount=1000
+    AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.remoteAddressPolicies.{{ $spoke.name }}-to-{{ $conn.hub }}-federation-policy.maxHops=1
+    AMQPConnections.{{ $conn.hub }}-connection.federations.{{ $spoke.name }}-federation.remoteAddressPolicies.{{ $spoke.name }}-to-{{ $conn.hub }}-federation-policy.includes.5604.addressMatch=messages.{{ $spoke.region }}.5604
     {{- end }}
 {{- end }}
