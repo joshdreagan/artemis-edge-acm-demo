@@ -74,6 +74,19 @@ gcp
 
 The script extracts credentials from the ACM secret you just created and automates the entire Hive provisioning pipeline.
 
+[IMPORTANT]
+====
+The provisioning script requires **cluster-admin** access. Verify before running:
+
+[source,bash,role=execute]
+----
+oc whoami
+oc auth can-i create clusterdeployments.hive.openshift.io --all-namespaces
+----
+
+You should see your user or service account name, and `yes` for the permission check. If not, ask your administrator to grant you `cluster-admin`.
+====
+
 ifndef::mode_multi_hub[]
 [source,bash,role=execute]
 ----

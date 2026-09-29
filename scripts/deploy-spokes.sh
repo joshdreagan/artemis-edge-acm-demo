@@ -146,14 +146,14 @@ if [[ "$ACTION" == "destroy" ]]; then
   echo "--- Patching ArgoCD to disable spokeProvisioning ---"
   CURRENT_VALUES=$(oc get application.argoproj.io field-content -n openshift-gitops \
     -o jsonpath='{.spec.source.helm.values}' 2>/dev/null)
-  PATCHED_VALUES=$(echo "$CURRENT_VALUES" | python3 -c "
-import sys, yaml
-v = yaml.safe_load(sys.stdin.read())
-if v and 'spokeProvisioning' in v:
-    v['spokeProvisioning']['enabled'] = False
-    v['spokeProvisioning'].pop('clusters', None)
-print(yaml.dump(v, default_flow_style=False))
-")
+  PATCHED_VALUES=$(echo "$CURRENT_VALUES" \
+    | sed '/^spokeProvisioning:/,/^[^ ]/{
+        /^[^ ]/!d
+        /^spokeProvisioning:/d
+      }')
+  PATCHED_VALUES="${PATCHED_VALUES}
+spokeProvisioning:
+  enabled: false"
   oc patch application.argoproj.io field-content -n openshift-gitops \
     --type merge -p "{\"spec\":{\"source\":{\"helm\":{\"values\":$(echo "$PATCHED_VALUES" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}}}}" 2>/dev/null
   log_ok "ArgoCD patched (spokeProvisioning.enabled: false)"
@@ -255,7 +255,7 @@ GCP_PROJECT_ID=""
 GCP_PROJECT_ID=$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.gcp.projectID}' 2>/dev/null || true)
 if [[ -z "$GCP_PROJECT_ID" ]]; then
   if [[ -f "${PROJECT_ROOT}/deployment-info.yml" ]]; then
-    GCP_PROJECT_ID=$(python3 -c "import yaml; print(yaml.safe_load(open('${PROJECT_ROOT}/deployment-info.yml')).get('gcp_project_id',''))" 2>/dev/null || true)
+    GCP_PROJECT_ID=$(grep 'gcp_project_id:' "${PROJECT_ROOT}/deployment-info.yml" | head -1 | awk '{print $2}' 2>/dev/null || true)
   fi
 fi
 [[ -n "$GCP_PROJECT_ID" ]] && log_ok "GCP Project: $GCP_PROJECT_ID" || { log_fail "Cannot determine GCP project ID"; exit 1; }
@@ -355,38 +355,38 @@ done
 log_step "4/6" "Patching ArgoCD field-content application..."
 
 # Build the cluster list YAML for the Helm values
-CLUSTER_YAML=""
+CLUSTER_LIST=""
 for i in $(seq 0 $((CLUSTER_COUNT - 1))); do
-  CLUSTER_YAML="${CLUSTER_YAML}
-    - name: ${SELECTED_SPOKES[$i]}
-      region: ${SELECTED_REGIONS[$i]}"
+  CLUSTER_LIST="${CLUSTER_LIST}
+  - name: ${SELECTED_SPOKES[$i]}
+    region: ${SELECTED_REGIONS[$i]}"
 done
 
 CURRENT_VALUES=$(oc get application.argoproj.io field-content -n openshift-gitops \
   -o jsonpath='{.spec.source.helm.values}' 2>/dev/null)
 
-PATCHED_VALUES=$(echo "$CURRENT_VALUES" | python3 -c "
-import sys, yaml
+# Strip any existing spokeProvisioning block from the YAML values string
+STRIPPED_VALUES=$(echo "$CURRENT_VALUES" \
+  | sed '/^spokeProvisioning:/,/^[^ ]/{
+      /^[^ ]/!d
+      /^spokeProvisioning:/d
+    }')
 
-v = yaml.safe_load(sys.stdin.read()) or {}
-v['spokeProvisioning'] = {
-    'enabled': True,
-    'baseDomain': '${BASE_DOMAIN}',
-    'gcpProjectID': '${GCP_PROJECT_ID}',
-    'gcpRegion': '${GCP_REGION}',
-    'clusterImageSet': '${CLUSTER_IMAGE_SET}',
-    'sshPublicKey': '''${SSH_PUB_KEY}''',
-    'networkType': 'OVNKubernetes',
-    'workerMachineType': '${MACHINE_TYPE}',
-    'masterMachineType': '${MACHINE_TYPE}',
-    'clusters': [
-$(for i in $(seq 0 $((CLUSTER_COUNT - 1))); do
-  echo "        {'name': '${SELECTED_SPOKES[$i]}', 'region': '${SELECTED_REGIONS[$i]}'},"
-done)
-    ],
-}
-print(yaml.dump(v, default_flow_style=False))
-")
+# Build the new spokeProvisioning block and append it
+SPOKE_BLOCK="spokeProvisioning:
+  enabled: true
+  baseDomain: ${BASE_DOMAIN}
+  gcpProjectID: ${GCP_PROJECT_ID}
+  gcpRegion: ${GCP_REGION}
+  clusterImageSet: ${CLUSTER_IMAGE_SET}
+  sshPublicKey: $(python3 -c "import json,sys; print(json.dumps('''${SSH_PUB_KEY}'''))")
+  networkType: OVNKubernetes
+  workerMachineType: ${MACHINE_TYPE}
+  masterMachineType: ${MACHINE_TYPE}
+  clusters:${CLUSTER_LIST}"
+
+PATCHED_VALUES="${STRIPPED_VALUES}
+${SPOKE_BLOCK}"
 
 oc patch application.argoproj.io field-content -n openshift-gitops \
   --type merge \
