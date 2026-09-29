@@ -404,6 +404,79 @@ SYNC_STATUS=$(oc get application.argoproj.io field-content -n openshift-gitops \
   -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
 log_ok "ArgoCD sync status: $SYNC_STATUS"
 
+# ── Step 4b: Create ClusterDeployments (owned by Hive, not ArgoCD) ───
+#
+# ClusterDeployments are intentionally excluded from the Helm chart
+# because Hive's admission webhook rejects any modification to
+# provisioned ClusterDeployments, causing permanent ArgoCD OutOfSync
+# (see issue #38). The script creates them directly.
+
+log_step "4b/6" "Creating Hive ClusterDeployments..."
+
+# Wait for install-config secrets (rendered by Helm chart via ArgoCD)
+echo "  Waiting for ArgoCD to render install-config secrets..."
+IC_WAIT=0
+IC_TIMEOUT=120
+while [[ $IC_WAIT -lt $IC_TIMEOUT ]]; do
+  IC_READY=true
+  for i in $(seq 0 $((CLUSTER_COUNT - 1))); do
+    SPOKE="${SELECTED_SPOKES[$i]}"
+    if ! oc get secret "${SPOKE}-install-config" -n "$SPOKE" &>/dev/null; then
+      IC_READY=false
+      break
+    fi
+  done
+  if [[ "$IC_READY" == "true" ]]; then break; fi
+  sleep 5
+  IC_WAIT=$((IC_WAIT + 5))
+done
+
+if [[ "$IC_READY" != "true" ]]; then
+  log_fail "install-config secrets not created after ${IC_TIMEOUT}s. Check ArgoCD sync."
+  exit 1
+fi
+log_ok "install-config secrets ready"
+
+for i in $(seq 0 $((CLUSTER_COUNT - 1))); do
+  SPOKE="${SELECTED_SPOKES[$i]}"
+  if oc get clusterdeployment "$SPOKE" -n "$SPOKE" &>/dev/null; then
+    log_ok "ClusterDeployment $SPOKE already exists — skipping"
+    continue
+  fi
+  oc apply -f - <<EOF
+apiVersion: hive.openshift.io/v1
+kind: ClusterDeployment
+metadata:
+  name: ${SPOKE}
+  namespace: ${SPOKE}
+  labels:
+    cloud: GCP
+    vendor: OpenShift
+spec:
+  baseDomain: ${BASE_DOMAIN}
+  clusterName: ${SPOKE}
+  controlPlaneConfig:
+    servingCertificates: {}
+  installAttemptsLimit: 1
+  installed: false
+  platform:
+    gcp:
+      credentialsSecretRef:
+        name: ${SPOKE}-gcp-creds
+      region: ${GCP_REGION}
+  provisioning:
+    installConfigSecretRef:
+      name: ${SPOKE}-install-config
+    sshPrivateKeySecretRef:
+      name: ${SPOKE}-ssh-private-key
+    imageSetRef:
+      name: ${CLUSTER_IMAGE_SET}
+  pullSecretRef:
+    name: ${SPOKE}-pull-secret
+EOF
+  log_ok "ClusterDeployment: $SPOKE"
+done
+
 # ── Step 5: Monitor Hive provisioning ────────────────────────────────
 
 log_step "5/6" "Waiting for Hive provisioning..."
