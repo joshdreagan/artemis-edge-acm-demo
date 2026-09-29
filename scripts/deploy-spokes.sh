@@ -260,9 +260,9 @@ if [[ -z "$GCP_PROJECT_ID" ]]; then
 fi
 [[ -n "$GCP_PROJECT_ID" ]] && log_ok "GCP Project: $GCP_PROJECT_ID" || { log_fail "Cannot determine GCP project ID"; exit 1; }
 
-# Base domain: strip "hub." prefix from cluster base domain to get sandbox domain
+# Base domain: strip hub prefix (hub., hub-east., hub-central., hub-west.) to get sandbox domain
 CLUSTER_BASE=$(oc get dns cluster -o jsonpath='{.spec.baseDomain}' 2>/dev/null || true)
-BASE_DOMAIN="${CLUSTER_BASE#hub.}"
+BASE_DOMAIN=$(echo "$CLUSTER_BASE" | sed 's/^hub[^.]*\.//')
 [[ -n "$BASE_DOMAIN" ]] && log_ok "Base domain: $BASE_DOMAIN" || { log_fail "Cannot determine base domain"; exit 1; }
 
 # GCP credentials: try ACM secret, then bastion file
